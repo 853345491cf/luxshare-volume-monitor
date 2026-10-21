@@ -347,6 +347,25 @@
     font-variant-numeric:tabular-nums;
   }
   .recent-row:last-child{border-bottom:none}
+
+  /* ---------- 明日参考位 ---------- */
+  .ref-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:14px}
+  .ref-col{background:var(--surface-2);border:1px solid var(--border);border-radius:12px;padding:12px 14px}
+  .ref-col-title{font-size:11.5px;font-weight:600;color:var(--muted);margin-bottom:8px}
+  .ref-col-title.r{color:var(--up)}
+  .ref-col-title.s{color:var(--down)}
+  .ref-col-title.i{color:var(--blue-bright)}
+  .ref-lvl{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px dashed var(--border);font-size:13px}
+  .ref-lvl:last-child{border-bottom:none}
+  .ref-lvl .p{font-variant-numeric:tabular-nums;font-weight:600;color:var(--ink);letter-spacing:.2px}
+  .ref-lvl .tag{font-size:11px;color:var(--muted);white-space:nowrap}
+  .ref-sig{display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:5px 0;border-bottom:1px dashed var(--border);font-size:12.5px}
+  .ref-sig:last-child{border-bottom:none}
+  .ref-sig .t{font-weight:600;flex:none}
+  .ref-sig .d{font-size:11.5px;color:var(--muted);text-align:right}
+  .ref-verdict{font-size:13px;font-weight:600;line-height:1.55;max-width:560px}
+  .ref-verdict .dot-mark{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px;vertical-align:1px;flex:none}
+  .ref-note{font-size:11px;color:var(--muted);margin-top:12px;line-height:1.6}
   .recent-row .d{color:var(--muted)}
 
   @media (max-width:720px){
@@ -370,6 +389,8 @@
     .bt-table em{display:block;margin-left:0;font-size:10px}
     .mchip{min-width:0;flex:1 1 42%}
     .recent-row{grid-template-columns:68px 1fr auto auto;gap:7px;font-size:12px}
+    .ref-grid{grid-template-columns:1fr}
+    .ref-verdict{font-size:12.5px}
   }
 </style>
 </head>
@@ -403,6 +424,7 @@
 
   <nav class="subnav">
     <a href="#overview">概览</a>
+    <a href="#ref">明日参考</a>
     <a href="#minute">分时量能</a>
     <a href="#daily">日线量能</a>
     <a href="#kline">日K·KDJ</a>
@@ -455,6 +477,31 @@
       <span class="verdict-headline" id="verdictHeadline">正在获取行情…</span>
     </div>
     <ul id="verdictBody"></ul>
+  </section>
+
+  <section class="card" id="ref" style="margin-top:16px">
+    <div class="chart-head">
+      <div>
+        <h2 class="card-title">明日参考位</h2>
+        <p class="card-sub" style="margin-bottom:0">由日线均线、KDJ、近期高低点与量价自动推算，仅供盘面参考，非买卖建议</p>
+      </div>
+      <div class="ref-verdict" id="refVerdict"><span class="dot-mark" style="background:var(--muted)"></span>等待数据</div>
+    </div>
+    <div class="ref-grid">
+      <div class="ref-col">
+        <div class="ref-col-title r">压力位</div>
+        <div id="refResist"></div>
+      </div>
+      <div class="ref-col">
+        <div class="ref-col-title s">支撑位</div>
+        <div id="refSupport"></div>
+      </div>
+      <div class="ref-col">
+        <div class="ref-col-title i">技术信号</div>
+        <div id="refSignals"></div>
+      </div>
+    </div>
+    <p class="ref-note">参考位随行情自动更新；压力 / 支撑为近期关键价位，突破或跌破后其意义会变化。KDJ 与均线基于前复权日线计算。</p>
   </section>
 
   <section class="card" id="minute" style="margin-top:16px">
@@ -1715,6 +1762,117 @@
     box.innerHTML = html;
   }
 
+  /* ============ 明日参考位 ============ */
+  var REF_TONE = {
+    up:     "#e66767",
+    down:   "#2aa876",
+    warn:   "#fab219",
+    good:   "#199e70",
+    shrink: "#199e70",
+    expand: "#d95926",
+    flat:   "#898781"
+  };
+
+  function renderRef(){
+    var box = $("refBody");
+    var days = state.days;
+    if (!days || days.length < 20){
+      box.innerHTML = '<p class="bt-note">历史数据不足，暂无法推算参考位。</p>';
+      $("refVerdict").innerHTML = '<span class="dot-mark" style="background:var(--muted)"></span>等待数据';
+      return;
+    }
+
+    var last = days[days.length - 1];
+    var q = state.lastGood;                       // 原始行情对象（含 price/ratio/chgPct/high/low）
+    var price = (q && isFinite(q.price) && q.price > 0) ? q.price : last.close;
+    var dayHigh = (q && isFinite(q.high)) ? q.high : last.high;
+    var dayLow  = (q && isFinite(q.low))  ? q.low  : last.low;
+
+    function ma(n){ var s = 0; for (var i = days.length - n; i < days.length; i++) s += days[i].close; return s / n; }
+    var ma5 = ma(5), ma10 = ma(10), ma20 = ma(20);
+
+    /* 整数关口：取一个有意义的上方整数档位（20 以上按 5 的倍数，低股价按整数/0.5） */
+    function roundLevel(v){
+      if (v >= 20) return Math.ceil(v / 5) * 5;
+      if (v >= 5)  return Math.ceil(v);
+      return Math.ceil(v * 2) / 2;
+    }
+
+    function dedupe(arr){
+      var out = [];
+      arr.forEach(function(x){
+        if (!out.some(function(y){ return Math.abs(y.p - x.p) < price * 0.0025; })) out.push(x);
+      });
+      return out;
+    }
+
+    var resCand = dedupe([
+      { p: dayHigh, tag: "今日高点" },
+      { p: ma20, tag: "20 日线" },
+      { p: roundLevel(price), tag: "整数关口" }
+    ].filter(function(x){ return isFinite(x.p) && x.p > price * 1.001; }))
+      .sort(function(a, b){ return a.p - b.p; }).slice(0, 3);
+
+    var supCand = dedupe([
+      { p: dayLow, tag: "今日低点" },
+      { p: ma5, tag: "5 日线" },
+      { p: ma10, tag: "10 日线" }
+    ].filter(function(x){ return isFinite(x.p) && x.p < price * 0.999; }))
+      .sort(function(a, b){ return b.p - a.p; }).slice(0, 3);
+
+    function lvlHtml(list){
+      if (!list.length) return '<div class="ref-lvl"><span class="tag">—</span></div>';
+      return list.map(function(x){
+        return '<div class="ref-lvl"><span class="tag">' + x.tag + '</span><span class="p">' + fmt(x.p, 2) + '</span></div>';
+      }).join("");
+    }
+    $("refResist").innerHTML = lvlHtml(resCand);
+    $("refSupport").innerHTML = lvlHtml(supCand);
+
+    /* 技术信号：KDJ / 量价 / 均线 */
+    var kd = computeKDJ(days);
+    var K = kd.K[kd.K.length - 1], D = kd.D[kd.D.length - 1], J = kd.J[kd.J.length - 1];
+
+    var ratio = (q && isFinite(q.ratio) && q.ratio > 0) ? q.ratio : null;
+    if (!ratio){ var a5 = prev5Avg(days); if (a5) ratio = last.vol / a5; }
+    var chg = (q && isFinite(q.chgPct)) ? q.chgPct : (days.length >= 2 ? (last.close / days[days.length - 2].close - 1) * 100 : null);
+
+    var sigs = [];
+    if (K > D){
+      sigs.push({ t: "KDJ 金叉", tone: J > 85 ? "warn" : "up", d: "K " + fmt(K, 1) + " / D " + fmt(D, 1) + (J > 85 ? " · J 超买" : "") });
+    } else {
+      sigs.push({ t: "KDJ 死叉", tone: "down", d: "K " + fmt(K, 1) + " / D " + fmt(D, 1) });
+    }
+
+    if (isFinite(ratio) && isFinite(chg)){
+      var dirTxt = chg > 0.2 ? "上涨" : chg < -0.2 ? "下跌" : "横盘";
+      var volTxt = ratio >= 1 ? "放量" : "缩量";
+      var extra = (chg > 0.2 && ratio < 1) ? " · 价涨量缩" : (chg > 0.2 && ratio >= 1) ? " · 量价齐升" : (chg < -0.2 && ratio < 1) ? " · 抛压衰竭" : "";
+      sigs.push({ t: volTxt + dirTxt, tone: ratio >= 1 ? "expand" : "shrink", d: "量比 " + fmt(ratio, 2) + extra });
+    }
+
+    sigs.push({ t: "均线", tone: price > ma20 ? "up" : "down", d: (price > ma5 ? "站上 5 日线" : "跌破 5 日线") + "，" + (price > ma20 ? "站稳 20 日线" : "未收复 20 日线") });
+
+    $("refSignals").innerHTML = sigs.map(function(s){
+      return '<div class="ref-sig"><span class="t" style="color:' + (REF_TONE[s.tone] || "var(--ink-2)") + '">' + s.t + '</span><span class="d">' + s.d + '</span></div>';
+    }).join("");
+
+    /* 综合研判 */
+    var verdict = "", tone = "flat";
+    if (isFinite(ratio) && isFinite(chg)){
+      if (chg > 0.2 && ratio < 1 && J > 85){ verdict = "缩量上涨 + J 超买，短线动能不足，明日大概率冲高回落或高位震荡，谨防回踩 5 日线"; tone = "warn"; }
+      else if (chg > 0.2 && ratio < 1){ verdict = "缩量上涨，缺乏增量资金，反弹持续性存疑，需放量确认"; tone = "shrink"; }
+      else if (chg > 0.2 && ratio >= 1){ verdict = "放量上涨，量价配合，短期偏强，关注能否站稳 20 日线"; tone = "up"; }
+      else if (chg < -0.2 && ratio < 1){ verdict = "缩量下跌，抛压衰竭，接近阶段低点，需放量阳线确认"; tone = "good"; }
+      else if (chg < -0.2 && ratio >= 1){ verdict = "放量下跌，资金出逃，调整或未结束，谨慎"; tone = "down"; }
+      else { verdict = "平量震荡，多空均衡，等待方向选择"; tone = "flat"; }
+    } else {
+      verdict = "数据不足，暂无法研判";
+    }
+    var c = REF_TONE[tone] || "var(--muted)";
+    $("refVerdict").innerHTML = '<span class="dot-mark" style="background:' + c + '"></span>' + verdict;
+  }
+
   /* ============ 切换标的 ============ */
   function updateTitle(name){
     var code = SYMBOL.slice(2);
@@ -1741,6 +1899,10 @@
     $("verdictBody").innerHTML = "";
     $("minuteChips").innerHTML = "";
     $("btBody").innerHTML = '<p class="bt-note">正在计算…</p>';
+    $("refResist").innerHTML = "";
+    $("refSupport").innerHTML = "";
+    $("refSignals").innerHTML = "";
+    $("refVerdict").innerHTML = '<span class="dot-mark" style="background:var(--muted)"></span>等待数据';
     renderChart();
     renderKline();
     renderMinute(null, null);
@@ -2002,6 +2164,7 @@
         state.prevClose = m.prev;
         renderMinute(state.minute, m.prev);
         renderBacktest();
+        renderRef();
         setStatus();
         $("fallback").classList.remove("show");
         hideError();
@@ -2016,6 +2179,7 @@
         if (isFinite(m2.prev) && m2.prev > 0) state.prevClose = m2.prev;
         renderMinute(state.minute, state.prevClose);
         renderBacktest();
+        renderRef();
         showError("实时接口暂时不可用，当前显示的是上次成功获取的数据。");
       } else {
         showError("无法获取行情数据。可能原因：网络被拦截、接口临时不可用，或非交易时段。可先使用下方手动输入。");
